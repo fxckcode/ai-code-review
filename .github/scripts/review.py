@@ -17,9 +17,17 @@ import sys
 MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
 MAX_TOKENS = int(os.environ.get("CLAUDE_MAX_TOKENS", "4096"))
 
-REPO = os.environ["REPO"]
-PR_NUMBER = os.environ["PR_NUMBER"]
-GH_TOKEN = os.environ["GITHUB_TOKEN"]
+REPO = os.environ.get("REPO") or os.environ.get("GITHUB_REPOSITORY", "")
+PR_NUMBER = os.environ.get("PR_NUMBER") or os.environ.get("GITHUB_PR_NUMBER", "")
+# Get GitHub token from env, or from gh auth if available
+GH_TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+if not GH_TOKEN:
+    try:
+        GH_TOKEN = subprocess.run(
+            ["gh", "auth", "token"], capture_output=True, text=True, timeout=10
+        ).stdout.strip()
+    except Exception:
+        pass
 
 SYSTEM_PROMPT = """Eres un code reviewer de alto nivel. Revisa el diff del PR y devuelve
 feedback estructurado ÚNICAMENTE cuando encuentres issues reales.
@@ -51,9 +59,10 @@ Si no hay comentarios, devuelve un array vacío [].
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def run_gh(*args: str, input_data: str | None = None) -> str:
-    """Run gh CLI with GITHUB_TOKEN auth. Returns stdout."""
-    cmd = ["gh", "--repo", REPO, *args]
+def run_gh(*args: str, input_data: str | None = None, use_repo: bool = True) -> str:
+    """Run gh CLI with GITHUB_TOKEN auth. Returns stdout.
+    use_repo=False omits the --repo flag (needed for `gh api`)."""
+    cmd = ["gh", "--repo", REPO, *args] if use_repo else ["gh", *args]
     env = {**os.environ, "GH_TOKEN": GH_TOKEN}
     result = subprocess.run(
         cmd,
@@ -187,6 +196,7 @@ def main():
         "--method", "POST",
         "--input", "-",
         input_data=json.dumps(payload),
+        use_repo=False,
     )
     review_data = json.loads(result)
     review_url = review_data.get("html_url", "N/A")
