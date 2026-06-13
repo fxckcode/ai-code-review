@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-AI Code Review — Claude + GitHub CLI inline comments.
+AI Code Review — OpenAI + GitHub CLI inline comments.
 
-Fetches PR diff, sends to Claude, posts structured feedback as
+Fetches PR diff, sends to OpenAI, posts structured feedback as
 inline PR review comments via the GitHub API (gh).
 """
 
@@ -14,8 +14,8 @@ import sys
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-MODEL = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-20250514")
-MAX_TOKENS = int(os.environ.get("CLAUDE_MAX_TOKENS", "4096"))
+MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
+MAX_TOKENS = int(os.environ.get("OPENAI_MAX_TOKENS", "4096"))
 
 REPO = os.environ["REPO"]
 PR_NUMBER = os.environ["PR_NUMBER"]
@@ -45,7 +45,8 @@ Devuelve un JSON array EXACTO (sin markdown, sin explicaciones extra):
   }
 ]
 
-Si no hay comentarios, devuelve un array vacío [].
+IMPORTANTE: los números de línea DEBEN corresponder al archivo en la rama destino
+(del lado RIGHT del diff). Si no tienes comentarios, devuelve un array vacío [].
 """
 
 # ---------------------------------------------------------------------------
@@ -72,7 +73,7 @@ def run_gh(*args: str, input_data: str | None = None) -> str:
 def extract_json(text: str) -> str:
     """Pull a JSON array from markdown code fences or raw text."""
     text = text.strip()
-    # Try ```json ... ``` block
+    # Try ```json ... ``` block (OpenAI often wraps in fences)
     if "```json" in text:
         start = text.index("```json") + 7
         end = text.index("```", start)
@@ -80,7 +81,11 @@ def extract_json(text: str) -> str:
     # Try ``` ... ``` block
     if text.startswith("```") and text.endswith("```"):
         return text.strip("` \n").strip()
-    # Assume raw JSON
+    # Assume raw JSON — find first '[' and last ']'
+    start_bracket = text.find("[")
+    end_bracket = text.rfind("]")
+    if start_bracket != -1 and end_bracket != -1 and end_bracket > start_bracket:
+        return text[start_bracket : end_bracket + 1]
     return text
 
 
@@ -89,7 +94,7 @@ def summarize_comments(comments: list[dict]) -> str:
     if not comments:
         return "✅ Sin observaciones. El código se ve bien."
 
-    by_severity = {"🔴 error": [], "⚠️  warning": [], "💡 suggestion": []}
+    by_severity: dict[str, list[dict]] = {}
     for c in comments:
         sev = c.get("severity", "💡 suggestion")
         by_severity.setdefault(sev, []).append(c)
@@ -126,26 +131,29 @@ def main():
         return
 
     # Truncate if too large (model context window)
-    if len(diff) > 80_000:
-        print(f"  ⚠️  Diff is large ({len(diff)} chars), truncating to 80k...")
-        diff = diff[:80_000] + "\n# ... (diff truncated due to size)"
+    if len(diff) > 100_000:
+        print(f"  ⚠️  Diff is large ({len(diff)} chars), truncating to 100k...")
+        diff = diff[:100_000] + "\n# ... (diff truncated due to size)"
 
-    # 2. Call Claude
-    print(f"  • Sending to Claude ({MODEL})...")
-    client = Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    # 2. Call OpenAI
+    print(f"  • Sending to OpenAI ({MODEL})...")
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 
     try:
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=MODEL,
             max_tokens=MAX_TOKENS,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": f"Revisa este PR diff:\n\n{diff}"}],
+            temperature=0.1,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"Revisa este PR diff:\n\n{diff}"},
+            ],
         )
     except Exception as e:
-        print(f"::error::Claude API call failed: {e}")
+        print(f"::error::OpenAI API call failed: {e}")
         sys.exit(1)
 
-    raw = response.content[0].text
+    raw = response.choices[0].message.content or ""
 
     # 3. Parse JSON response
     try:
@@ -154,16 +162,16 @@ def main():
         if not isinstance(comments, list):
             raise ValueError("Response is not a JSON array")
     except (json.JSONDecodeError, ValueError) as e:
-        print(f"::error::Failed to parse Claude response as JSON: {e}")
+        print(f"::error::Failed to parse OpenAI response as JSON: {e}")
         print(f"Raw response:\n{raw}")
         sys.exit(1)
 
-    print(f"  • Claude returned {len(comments)} comment(s)")
+    print(f"  • OpenAI returned {len(comments)} comment(s)")
 
     # 4. Build review payload
     review_body = summarize_comments(comments)
 
-    # Map Claude output to GitHub API format
+    # Map OpenAI output to GitHub API format
     api_comments = []
     for c in comments:
         api_comments.append({
@@ -195,5 +203,5 @@ def main():
 
 if __name__ == "__main__":
     # Import here so env vars are loaded first
-    from anthropic import Anthropic
+    from openai import OpenAI
     main()
