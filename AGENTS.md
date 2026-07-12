@@ -36,7 +36,10 @@ subprocess.run(["claude", "--print"], input=prompt, ...)
 
 `AI_REVIEW_*` token values must not be passed as command-line arguments or printed to stdout/stderr.
 They must be remapped inside `_build_env()` and passed exclusively through the child process
-environment.  Log only the last 8 KB of adapter output unless `AI_REVIEW_DEBUG=1`.
+environment.  Child processes (npm, Claude CLI, `gh`) MUST use a **least-privilege allowlist
+env** — never `{**os.environ}`.  Do not forward unused `AI_REVIEW_*` secrets or `GH_TOKEN` to
+the model CLI.  Log only the last 8 KB of adapter output unless `AI_REVIEW_DEBUG=1`.  Never
+post raw adapter stderr / exception text onto the PR review body.
 
 ### 3. No vendor SDK imports in the orchestrator
 
