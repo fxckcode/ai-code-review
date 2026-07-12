@@ -62,14 +62,18 @@ class TestRegistrySelect:
         with pytest.raises(NotImplementedError, match="not implemented yet"):
             adapter.run(prompt="p", diff_path="/tmp/x.diff", config={})
 
-    def test_claude_stub_ensure_installed_raises(self):
+    def test_claude_real_ensure_installed_requires_token(self, monkeypatch):
+        """Phase 3: Claude adapter is real — missing token raises RuntimeError (not stub)."""
+        monkeypatch.delenv("AI_REVIEW_CLAUDE_TOKEN", raising=False)
         adapter = registry.select("claude")
-        with pytest.raises(NotImplementedError, match="not implemented yet"):
+        with pytest.raises(RuntimeError, match="AI_REVIEW_CLAUDE_TOKEN"):
             adapter.ensure_installed()
 
-    def test_claude_stub_run_raises(self):
+    def test_claude_real_run_requires_token(self, monkeypatch):
+        """Phase 3: Claude adapter is real — missing token raises RuntimeError (not stub)."""
+        monkeypatch.delenv("AI_REVIEW_CLAUDE_TOKEN", raising=False)
         adapter = registry.select("claude")
-        with pytest.raises(NotImplementedError, match="not implemented yet"):
+        with pytest.raises(RuntimeError, match="AI_REVIEW_CLAUDE_TOKEN"):
             adapter.run(prompt="p", diff_path="/tmp/x.diff", config={})
 
     # --- Transport attribute present ------------------------------------------
