@@ -66,23 +66,27 @@ def extract_json(text: str) -> list:
     """
     text = text.strip()
 
+    def _as_array(raw: str) -> list:
+        result = json.loads(raw)
+        if not isinstance(result, list):
+            raise ValueError("Expected a JSON array of review comments")
+        return result
+
     # Strategy 1: plain JSON
     try:
-        result = json.loads(text)
-        if isinstance(result, list):
-            return result
-    except json.JSONDecodeError:
+        return _as_array(text)
+    except (json.JSONDecodeError, ValueError):
         pass
 
     # Strategy 2: ```json … ``` fence
     m = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
     if m:
-        return json.loads(m.group(1))
+        return _as_array(m.group(1))
 
     # Strategy 3: generic ``` … ``` fence
     m = re.search(r"```\s*(.*?)\s*```", text, re.DOTALL)
     if m:
-        return json.loads(m.group(1))
+        return _as_array(m.group(1))
 
     raise ValueError("No parseable JSON array found in adapter output")
 
@@ -242,7 +246,36 @@ def summarize(
 # ---------------------------------------------------------------------------
 
 def _gh_env() -> dict[str, str]:
-    return {**os.environ, "GH_TOKEN": GH_TOKEN}
+    """Least-privilege env for ``gh`` — no AI_REVIEW_* / Anthropic secrets."""
+    keys = (
+        "PATH",
+        "HOME",
+        "USER",
+        "USERPROFILE",
+        "USERNAME",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "SystemRoot",
+        "SYSTEMROOT",
+        "ComSpec",
+        "COMSPEC",
+        "LANG",
+        "LC_ALL",
+        "TZ",
+        "GH_HOST",
+        "GH_ENTERPRISE_TOKEN",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+    )
+    env: dict[str, str] = {}
+    for key in keys:
+        value = os.environ.get(key)
+        if value is not None:
+            env[key] = value
+    env["GH_TOKEN"] = GH_TOKEN
+    return env
 
 
 def run_gh(
@@ -499,62 +532,73 @@ def main() -> None:
     finally:
         diff_tmp.close()
 
-    # --- Ensure adapter is installed ----------------------------------------
-    print("  • Ensuring adapter is installed...")
     try:
-        adapter.ensure_installed()
-    except Exception as exc:
-        print(f"::error::Adapter install failed: {exc}", file=sys.stderr)
-        sys.exit(1)
+        # --- Ensure adapter is installed ----------------------------------------
+        print("  • Ensuring adapter is installed...")
+        try:
+            adapter.ensure_installed()
+        except Exception as exc:
+            print(f"::error::Adapter install failed: {exc}", file=sys.stderr)
+            sys.exit(1)
 
-    # --- Run adapter with retry on parse failure ----------------------------
-    config = {
-        "model": os.environ.get("AI_REVIEW_MODEL", ""),
-        "debug": DEBUG,
-        "timeout": ADAPTER_TIMEOUT,
-    }
-    comments: list[dict]
+        # --- Run adapter with retry on parse failure ----------------------------
+        config = {
+            "model": os.environ.get("AI_REVIEW_MODEL", ""),
+            "debug": DEBUG,
+            "timeout": ADAPTER_TIMEOUT,
+        }
+        comments: list[dict]
 
-    try:
-        comments = run_with_retry(adapter, prompt, diff_path, config)
-    except subprocess.TimeoutExpired:
-        post_failure_comment(AGENT, "The agent timed out after 5 minutes.")
-        return  # post_failure_comment calls sys.exit(0)
-    except (ValueError, json.JSONDecodeError) as exc:
-        # Parse failure exhausted — job exits red
-        print(f"::error::Parse failure after retry: {exc}", file=sys.stderr)
-        sys.exit(1)
-    except Exception as exc:
-        # Adapter crash — post ⚠️ comment, stay green
-        post_failure_comment(AGENT, f"The agent encountered an error: {exc}")
-        return
+        try:
+            comments = run_with_retry(adapter, prompt, diff_path, config)
+        except subprocess.TimeoutExpired:
+            post_failure_comment(AGENT, "The agent timed out after 5 minutes.")
+            return  # post_failure_comment calls sys.exit(0)
+        except (ValueError, json.JSONDecodeError) as exc:
+            # Parse failure exhausted — job exits red
+            print(f"::error::Parse failure after retry: {exc}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as exc:
+            # Adapter crash — post generic ⚠️ comment (no stderr/exc on PR), stay green
+            print(f"::error::Adapter crash: {exc}", file=sys.stderr)
+            post_failure_comment(
+                AGENT,
+                "The agent encountered an unexpected error. "
+                "Check the Actions log for details.",
+            )
+            return
 
-    print(f"  • Adapter returned {len(comments)} comment(s)")
+        print(f"  • Adapter returned {len(comments)} comment(s)")
 
-    # --- Filter and anchor comments against the diff ------------------------
-    anchored, unanchored = filter_and_anchor(comments, diff)
-    if unanchored:
-        print(
-            f"  ↷ {len(unanchored)} comment(s) dropped (not in diff):",
-            file=sys.stderr,
-        )
-        for c in unanchored:
+        # --- Filter and anchor comments against the diff ------------------------
+        anchored, unanchored = filter_and_anchor(comments, diff)
+        if unanchored:
             print(
-                f"      {c.get('path', '?')}:{c.get('line', '?')}",
+                f"  ↷ {len(unanchored)} comment(s) dropped (not in diff):",
                 file=sys.stderr,
             )
+            for c in unanchored:
+                print(
+                    f"      {c.get('path', '?')}:{c.get('line', '?')}",
+                    file=sys.stderr,
+                )
 
-    # --- Determine review event ---------------------------------------------
-    if anchored:
-        event = severity_to_event(anchored)
-    else:
-        event = "COMMENT"
+        # --- Determine review event ---------------------------------------------
+        if anchored:
+            event = severity_to_event(anchored)
+        else:
+            event = "COMMENT"
 
-    # --- Build body and post review -----------------------------------------
-    body = summarize(AGENT, anchored, unanchored)
-    print(f"  • Posting review (event={event}, inline={len(anchored)})...")
-    url = post_review(AGENT, event, body, anchored)
-    print(f"\n✅ Review posted ({event}): {url}")
+        # --- Build body and post review -----------------------------------------
+        body = summarize(AGENT, anchored, unanchored)
+        print(f"  • Posting review (event={event}, inline={len(anchored)})...")
+        url = post_review(AGENT, event, body, anchored)
+        print(f"\n✅ Review posted ({event}): {url}")
+    finally:
+        try:
+            os.unlink(diff_path)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":

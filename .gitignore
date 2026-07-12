@@ -6,3 +6,9 @@ venv/
 *.egg-info/
 dist/
 build/
+
+# Agent / test caches (skills themselves are tracked under .agents/)
+.atl/
+.pytest_cache/
+.github/scripts/.pytest_cache/
+.github/scripts/**/__pycache__/
