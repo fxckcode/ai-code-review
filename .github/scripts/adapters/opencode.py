@@ -1,30 +1,32 @@
-"""OpenCode CLI adapter.
+"""OpenCode CLI adapter over ACP (Agent Client Protocol).
 
-Transport: argv — ``opencode run`` with the review prompt attached as a file;
-stdout is parsed by the orchestrator's ``extract_json``.
+Transport: ``acp`` — spawns ``opencode acp`` and speaks JSON-RPC NDJSON on
+stdio. Agent reply text is collected from ``session/update`` notifications
+(``agent_message_chunk``) and parsed into the review comment array.
 
 Install: ``npm install -g opencode-ai``
-Auth:    ``AI_REVIEW_OPENCODE_TOKEN`` is remapped to ``OPENAI_API_KEY``
-         (OpenCode reads standard provider env keys).  The source key is not
-         present in the child environment.
-
-Threat mitigations:
-- subprocess argv list (no ``shell=True``)
-- least-privilege env (no other ``AI_REVIEW_*`` / ``GH_TOKEN``)
-- token never logged; crash messages stay generic
+Auth:    ``AI_REVIEW_OPENCODE_TOKEN`` → ``OPENCODE_API_KEY`` (see
+         https://opencode.ai/docs/acp/).
 """
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 import sys
+import threading
+import time
+from pathlib import Path
+from queue import Empty, Queue
+from typing import Any, Optional
 
 from .base import Adapter
 
-_TOKEN_SRC: str = "AI_REVIEW_OPENCODE_TOKEN"
-_TOKEN_DEST: str = "OPENAI_API_KEY"
-_LOG_TAIL: int = 8 * 1024
+_TOKEN_SRC = "AI_REVIEW_OPENCODE_TOKEN"
+_TOKEN_DEST = "OPENCODE_API_KEY"
+_LOG_TAIL = 8 * 1024
 
 _BASE_ENV_KEYS: tuple[str, ...] = (
     "PATH",
@@ -54,12 +56,11 @@ _BASE_ENV_KEYS: tuple[str, ...] = (
 
 
 class OpencodeAdapter(Adapter):
-    """Argv-transport adapter for the OpenCode CLI."""
+    """ACP-transport adapter for OpenCode (``opencode acp``)."""
 
-    transport = "argv"
+    transport = "acp"
 
     def ensure_installed(self) -> None:
-        """Verify auth token and install ``opencode-ai`` globally (latest)."""
         _require_token()
         try:
             subprocess.run(
@@ -81,42 +82,256 @@ class OpencodeAdapter(Adapter):
             ) from exc
 
     def run(self, *, prompt: str, diff_path: str, config: dict) -> str:
-        """Invoke ``opencode run`` with the full prompt as the message.
+        """Run a one-shot ACP prompt turn; return agent message text for parse."""
+        debug = bool(config.get("debug", False))
+        timeout = int(config.get("timeout", 300))
+        cwd = os.environ.get("GITHUB_WORKSPACE") or os.getcwd()
 
-        Returns raw stdout for the orchestrator to parse.
-        """
-        debug: bool = bool(config.get("debug", False))
-        timeout: int = int(config.get("timeout", 300))
-        env = _build_env()
-
-        # Pass prompt as the positional message (not ``-f``): OpenCode treats
-        # trailing args after ``--file`` as additional file paths.
-        cmd = [
-            "opencode",
-            "run",
-            "--pure",
-            "--format",
-            "default",
-            "--auto",
-        ]
-        if config.get("model"):
-            cmd.extend(["-m", str(config["model"])])
-        cmd.append(prompt)
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
+        return _acp_prompt_turn(
+            prompt=prompt,
+            cwd=cwd,
+            env=_build_env(),
             timeout=timeout,
-            env=env,
+            debug=debug,
         )
 
-        _log_output(result.stdout, result.stderr, debug=debug)
 
-        if result.returncode != 0:
-            raise RuntimeError(f"opencode run exited {result.returncode}")
+# ---------------------------------------------------------------------------
+# ACP client (stdio JSON-RPC NDJSON)
+# ---------------------------------------------------------------------------
 
-        return result.stdout
+def _acp_prompt_turn(
+    *,
+    prompt: str,
+    cwd: str,
+    env: dict[str, str],
+    timeout: int,
+    debug: bool,
+) -> str:
+    """initialize → session/new → session/prompt; return agent message text."""
+    cmd = [_opencode_bin(), "acp", "--pure", "--cwd", cwd]
+    proc = subprocess.Popen(
+        cmd,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=cwd,
+        env=env,
+        bufsize=1,
+    )
+    assert proc.stdin and proc.stdout and proc.stderr
+
+    q: Queue[Optional[dict[str, Any]]] = Queue()
+    chunks: list[str] = []
+    stderr_buf: list[str] = []
+
+    def _stdout_reader() -> None:
+        for line in proc.stdout:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                q.put(json.loads(line))
+            except json.JSONDecodeError:
+                if debug:
+                    sys.stderr.write(f"[AI_REVIEW_DEBUG] non-json: {line[:200]}\n")
+        q.put(None)
+
+    def _stderr_reader() -> None:
+        for line in proc.stderr:
+            stderr_buf.append(line)
+        # keep quiet unless debug / failure
+
+    threading.Thread(target=_stdout_reader, daemon=True).start()
+    threading.Thread(target=_stderr_reader, daemon=True).start()
+
+    deadline = time.time() + timeout
+    next_id = 1
+
+    def send(msg: dict[str, Any]) -> None:
+        proc.stdin.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        proc.stdin.flush()
+
+    def rpc(method: str, params: dict[str, Any]) -> dict[str, Any]:
+        nonlocal next_id
+        req_id = next_id
+        next_id += 1
+        send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
+        return _wait_rpc(proc, q, req_id, deadline, chunks, send)
+
+    try:
+        rpc(
+            "initialize",
+            {
+                "protocolVersion": 1,
+                "clientCapabilities": {
+                    "fs": {"readTextFile": True, "writeTextFile": False},
+                },
+                "clientInfo": {"name": "ai-code-review", "version": "1.0.0"},
+            },
+        )
+        session = rpc("session/new", {"cwd": cwd, "mcpServers": []})
+        session_id = session.get("sessionId")
+        if not session_id:
+            raise RuntimeError("opencode acp session/new missing sessionId")
+
+        result = rpc(
+            "session/prompt",
+            {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": prompt}],
+            },
+        )
+        stop = result.get("stopReason")
+        if debug:
+            sys.stderr.write(f"[AI_REVIEW_DEBUG] stopReason={stop!r}\n")
+
+        text = "".join(chunks).strip()
+        if not text:
+            raise RuntimeError("opencode acp returned empty agent message")
+        if debug:
+            sys.stderr.write(
+                f"[AI_REVIEW_DEBUG] agent text ({len(text)} chars):\n{text}\n"
+            )
+        return text
+    except Exception:
+        tail = "".join(stderr_buf)[-_LOG_TAIL:]
+        if tail.strip():
+            sys.stderr.write(f"  [opencode-acp] stderr tail:\n{tail}\n")
+        raise
+    finally:
+        try:
+            proc.stdin.close()
+        except OSError:
+            pass
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def _wait_rpc(
+    proc: subprocess.Popen[str],
+    q: Queue[Optional[dict[str, Any]]],
+    req_id: int,
+    deadline: float,
+    chunks: list[str],
+    send,
+) -> dict[str, Any]:
+    while time.time() < deadline:
+        try:
+            msg = q.get(timeout=0.5)
+        except Empty:
+            if proc.poll() is not None:
+                raise RuntimeError(
+                    f"opencode acp exited early (code {proc.returncode})"
+                )
+            continue
+        if msg is None:
+            raise RuntimeError("opencode acp stdout closed")
+
+        # Notifications
+        if "method" in msg and "id" not in msg:
+            if msg.get("method") == "session/update":
+                _collect_chunk(msg.get("params") or {}, chunks)
+            continue
+
+        # Agent → client requests
+        if "method" in msg and "id" in msg:
+            _handle_agent_request(msg, send)
+            continue
+
+        if msg.get("id") == req_id:
+            if "error" in msg:
+                raise RuntimeError(f"opencode acp error: {msg['error']}")
+            return msg.get("result") or {}
+
+    raise subprocess.TimeoutExpired(cmd="opencode acp", timeout=int(deadline))
+
+
+def _collect_chunk(params: dict[str, Any], chunks: list[str]) -> None:
+    update = params.get("update") or {}
+    if update.get("sessionUpdate") != "agent_message_chunk":
+        return
+    content = update.get("content") or {}
+    if isinstance(content, dict) and content.get("type") == "text":
+        text = content.get("text")
+        if text:
+            chunks.append(str(text))
+
+
+def _handle_agent_request(msg: dict[str, Any], send) -> None:
+    """Auto-reply to agent→client requests.
+
+    Permission requests are cancelled so the model stays text-only for review.
+    File reads are served when possible (absolute paths).
+    """
+    method = msg.get("method")
+    req_id = msg["id"]
+    params = msg.get("params") or {}
+
+    if method == "session/request_permission":
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {"outcome": {"outcome": "cancelled"}},
+            }
+        )
+        return
+
+    if method == "fs/read_text_file":
+        path = params.get("path")
+        try:
+            content = Path(path).read_text(encoding="utf-8") if path else ""
+            send({"jsonrpc": "2.0", "id": req_id, "result": {"content": content}})
+        except OSError as exc:
+            send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "error": {"code": -32000, "message": str(exc)},
+                }
+            )
+        return
+
+    send(
+        {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32601, "message": f"Method not supported: {method}"},
+        }
+    )
+
+
+# ---------------------------------------------------------------------------
+# Env / binary helpers
+# ---------------------------------------------------------------------------
+
+def _opencode_bin() -> str:
+    which = shutil.which("opencode")
+    if which and not which.lower().endswith(".ps1"):
+        return which
+    # Linux/mac npm global or Windows .exe
+    for candidate in (
+        Path(os.environ.get("APPDATA", ""))
+        / "npm"
+        / "node_modules"
+        / "opencode-ai"
+        / "bin"
+        / "opencode.exe",
+        Path("/usr/local/bin/opencode"),
+        Path.home() / ".local" / "bin" / "opencode",
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    if which:
+        return which
+    return "opencode"
 
 
 def _minimal_base_env() -> dict[str, str]:
@@ -133,35 +348,14 @@ def _require_token() -> str:
     if not token:
         raise RuntimeError(
             f"Missing required secret {_TOKEN_SRC!r}. "
-            "Set it as a repository secret (OpenAI/compatible API key for OpenCode) "
-            f"and pass it via ``secrets.{_TOKEN_SRC}``."
+            "Set your OpenCode API key as that secret "
+            f"(remapped to {_TOKEN_DEST})."
         )
     return token
 
 
 def _build_env() -> dict[str, str]:
-    """Least-privilege env: remap token → ``OPENAI_API_KEY`` only."""
     token = _require_token()
     env = _minimal_base_env()
     env[_TOKEN_DEST] = token
     return env
-
-
-def _tail(text: str, n: int) -> str:
-    return text[-n:] if len(text) > n else text
-
-
-def _log_output(stdout: str, stderr: str, *, debug: bool) -> None:
-    if debug:
-        sys.stderr.write(
-            f"[AI_REVIEW_DEBUG] opencode stdout ({len(stdout)} chars):\n{stdout}\n"
-        )
-        if stderr.strip():
-            sys.stderr.write(
-                f"[AI_REVIEW_DEBUG] opencode stderr ({len(stderr)} chars):\n{stderr}\n"
-            )
-    else:
-        combined = stderr if stderr.strip() else stdout
-        tail = _tail(combined, _LOG_TAIL)
-        if tail.strip():
-            sys.stderr.write(f"  [opencode] output tail:\n{tail}\n")

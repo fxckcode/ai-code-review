@@ -29,7 +29,8 @@ jobs:
         env:
           AI_REVIEW_GITHUB_TOKEN: ${{ secrets.AI_REVIEW_GITHUB_TOKEN }}
           AI_REVIEW_CLAUDE_TOKEN: ${{ secrets.AI_REVIEW_CLAUDE_TOKEN }}
-          # Prefer dedicated secret; fall back to existing OPENAI_API_KEY for smoke.
+          # Prefer dedicated OpenCode key; optional fallback to OPENAI_API_KEY only
+          # if you intentionally store the OpenCode key under that name.
           AI_REVIEW_OPENCODE_TOKEN: ${{ secrets.AI_REVIEW_OPENCODE_TOKEN || secrets.OPENAI_API_KEY }}
           AI_REVIEW_CURSOR_TOKEN: ${{ secrets.AI_REVIEW_CURSOR_TOKEN }}
           AI_REVIEW_ANTIGRAVITY_TOKEN: ${{ secrets.AI_REVIEW_ANTIGRAVITY_TOKEN }}

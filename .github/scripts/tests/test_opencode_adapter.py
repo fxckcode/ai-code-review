@@ -1,17 +1,14 @@
-"""Unit tests for the OpenCode adapter (no live CLI required)."""
+"""Unit tests for OpenCode ACP adapter helpers (no live CLI required)."""
 
 from __future__ import annotations
 
-import subprocess
-from unittest.mock import MagicMock
-
 import pytest
 
-from adapters.opencode import OpencodeAdapter, _build_env, _require_token
+from adapters.opencode import OpencodeAdapter, _build_env, _collect_chunk, _require_token
 
 
-class TestTokenRequired:
-    def test_missing_token_raises(self, monkeypatch):
+class TestToken:
+    def test_missing_token(self, monkeypatch):
         monkeypatch.delenv("AI_REVIEW_OPENCODE_TOKEN", raising=False)
         with pytest.raises(RuntimeError, match="AI_REVIEW_OPENCODE_TOKEN"):
             _require_token()
@@ -22,57 +19,45 @@ class TestTokenRequired:
             OpencodeAdapter().ensure_installed()
 
 
-class TestBuildEnv:
-    def test_remaps_to_openai_key(self, monkeypatch):
-        monkeypatch.setenv("AI_REVIEW_OPENCODE_TOKEN", "sk-test")
+class TestEnv:
+    def test_remaps_to_opencode_api_key(self, monkeypatch):
+        monkeypatch.setenv("AI_REVIEW_OPENCODE_TOKEN", "oc-key")
         env = _build_env()
-        assert env.get("OPENAI_API_KEY") == "sk-test"
+        assert env.get("OPENCODE_API_KEY") == "oc-key"
         assert "AI_REVIEW_OPENCODE_TOKEN" not in env
+        assert "OPENAI_API_KEY" not in env
 
-    def test_job_secrets_not_inherited(self, monkeypatch):
-        monkeypatch.setenv("AI_REVIEW_OPENCODE_TOKEN", "sk-test")
-        monkeypatch.setenv("AI_REVIEW_GITHUB_TOKEN", "gh-secret")
-        monkeypatch.setenv("AI_REVIEW_CLAUDE_TOKEN", "claude-secret")
-        monkeypatch.setenv("GH_TOKEN", "legacy")
+    def test_no_job_secrets(self, monkeypatch):
+        monkeypatch.setenv("AI_REVIEW_OPENCODE_TOKEN", "oc-key")
+        monkeypatch.setenv("AI_REVIEW_GITHUB_TOKEN", "gh")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk")
         env = _build_env()
         assert "AI_REVIEW_GITHUB_TOKEN" not in env
-        assert "AI_REVIEW_CLAUDE_TOKEN" not in env
-        assert "GH_TOKEN" not in env
+        assert env.get("OPENCODE_API_KEY") == "oc-key"
 
 
-class TestRunArgv:
-    def test_run_uses_list_argv_no_shell(self, monkeypatch):
-        monkeypatch.setenv("AI_REVIEW_OPENCODE_TOKEN", "sk-test")
-        calls: list[list[str]] = []
-
-        def fake_run(cmd, **kwargs):
-            calls.append(list(cmd))
-            assert kwargs.get("shell") in (None, False)
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=0, stdout="[]", stderr=""
-            )
-
-        monkeypatch.setattr("adapters.opencode.subprocess.run", fake_run)
-        out = OpencodeAdapter().run(
-            prompt="review please", diff_path="/tmp/x.diff", config={"timeout": 30}
+class TestCollectChunk:
+    def test_collects_agent_message_chunks(self):
+        chunks: list[str] = []
+        _collect_chunk(
+            {
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "Hello"},
+                }
+            },
+            chunks,
         )
-        assert out == "[]"
-        assert calls
-        assert calls[0][0] == "opencode"
-        assert "run" in calls[0]
-        assert "--pure" in calls[0]
-        assert "--auto" in calls[0]
-        assert "review please" in calls[0]
+        _collect_chunk(
+            {
+                "update": {
+                    "sessionUpdate": "agent_thought_chunk",
+                    "content": {"type": "text", "text": "thinking"},
+                }
+            },
+            chunks,
+        )
+        assert "".join(chunks) == "Hello"
 
-    def test_nonzero_exit_raises_without_stderr_in_message(self, monkeypatch):
-        monkeypatch.setenv("AI_REVIEW_OPENCODE_TOKEN", "sk-test")
-
-        def fake_run(cmd, **kwargs):
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=2, stdout="", stderr="SECRET_LEAK_SHOULD_NOT_SURFACE"
-            )
-
-        monkeypatch.setattr("adapters.opencode.subprocess.run", fake_run)
-        with pytest.raises(RuntimeError, match="exited 2") as ei:
-            OpencodeAdapter().run(prompt="p", diff_path="/tmp/x", config={})
-        assert "SECRET_LEAK" not in str(ei.value)
+    def test_transport_is_acp(self):
+        assert OpencodeAdapter.transport == "acp"
