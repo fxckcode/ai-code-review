@@ -19,7 +19,6 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import tempfile
 
 from .base import Adapter
 
@@ -82,7 +81,7 @@ class OpencodeAdapter(Adapter):
             ) from exc
 
     def run(self, *, prompt: str, diff_path: str, config: dict) -> str:
-        """Invoke ``opencode run`` with the prompt attached as a file.
+        """Invoke ``opencode run`` with the full prompt as the message.
 
         Returns raw stdout for the orchestrator to parse.
         """
@@ -90,36 +89,27 @@ class OpencodeAdapter(Adapter):
         timeout: int = int(config.get("timeout", 300))
         env = _build_env()
 
-        prompt_file = _write_prompt_file(prompt)
-        try:
-            cmd = [
-                "opencode",
-                "run",
-                "--pure",
-                "--format",
-                "default",
-                "--auto",
-                "-f",
-                prompt_file,
-                "Follow the attached review instructions exactly. "
-                "Reply with ONLY the JSON array of review comments "
-                "(no markdown fences required if the whole reply is the array).",
-            ]
-            if config.get("model"):
-                cmd.extend(["-m", str(config["model"])])
+        # Pass prompt as the positional message (not ``-f``): OpenCode treats
+        # trailing args after ``--file`` as additional file paths.
+        cmd = [
+            "opencode",
+            "run",
+            "--pure",
+            "--format",
+            "default",
+            "--auto",
+        ]
+        if config.get("model"):
+            cmd.extend(["-m", str(config["model"])])
+        cmd.append(prompt)
 
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                env=env,
-            )
-        finally:
-            try:
-                os.unlink(prompt_file)
-            except OSError:
-                pass
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
 
         _log_output(result.stdout, result.stderr, debug=debug)
 
@@ -127,18 +117,6 @@ class OpencodeAdapter(Adapter):
             raise RuntimeError(f"opencode run exited {result.returncode}")
 
         return result.stdout
-
-
-def _write_prompt_file(prompt: str) -> str:
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".md", delete=False, encoding="utf-8"
-    )
-    try:
-        tmp.write(prompt)
-        tmp.flush()
-        return tmp.name
-    finally:
-        tmp.close()
 
 
 def _minimal_base_env() -> dict[str, str]:

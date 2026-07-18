@@ -62,6 +62,7 @@ class TestRunArgv:
         assert "run" in calls[0]
         assert "--pure" in calls[0]
         assert "--auto" in calls[0]
+        assert "review please" in calls[0]
 
     def test_nonzero_exit_raises_without_stderr_in_message(self, monkeypatch):
         monkeypatch.setenv("AI_REVIEW_OPENCODE_TOKEN", "sk-test")
