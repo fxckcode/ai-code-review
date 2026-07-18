@@ -75,15 +75,15 @@ concurrency:
 
 | Input | Required | Description |
 |-------|----------|-------------|
-| `agent` | yes | Agent CLI to use. Accepted: `claude`. Others (`opencode`, `cursor`, `antigravity`) are declared but not yet implemented — they will fail with `not implemented yet`. |
+| `agent` | yes | Agent CLI to use. Implemented: `claude`, `opencode`. Stubs (`cursor`, `antigravity`) fail with `not implemented yet`. |
 
 ### Secrets and environment variables
 
 | Variable | Secret? | Description |
 |----------|---------|-------------|
 | `AI_REVIEW_GITHUB_TOKEN` | yes | GitHub token with `pull-requests: write`. Use a PAT or the default `GITHUB_TOKEN`. |
-| `AI_REVIEW_CLAUDE_TOKEN` | yes | Anthropic token for the Claude CLI (`claude` agent). Remapped internally to `ANTHROPIC_API_KEY`. |
-| `AI_REVIEW_OPENCODE_TOKEN` | yes | Token for the OpenCode agent (reserved; not implemented yet). |
+| `AI_REVIEW_CLAUDE_TOKEN` | for `claude` | Anthropic token. Remapped to `ANTHROPIC_API_KEY`. |
+| `AI_REVIEW_OPENCODE_TOKEN` | for `opencode` | Provider API key for OpenCode. Remapped to `OPENAI_API_KEY`. Falls back to repo secret `OPENAI_API_KEY` if unset. |
 | `AI_REVIEW_CURSOR_TOKEN` | yes | Token for the Cursor agent (reserved; not implemented yet). |
 | `AI_REVIEW_ANTIGRAVITY_TOKEN` | yes | Token for the Antigravity agent (reserved; not implemented yet). |
 | `AI_REVIEW_MODEL` | optional | Override the model used by the agent CLI (agent-specific format). |
@@ -97,8 +97,8 @@ Only set the token secret for the agent you are using — unused tokens are igno
 
 | Agent | Status | Token secret |
 |-------|--------|--------------|
-| `claude` | **Implemented** — installs `@anthropic-ai/claude-code` (npm, latest) at run time | `AI_REVIEW_CLAUDE_TOKEN` |
-| `opencode` | Not yet implemented | `AI_REVIEW_OPENCODE_TOKEN` |
+| `claude` | **Implemented** — installs `@anthropic-ai/claude-code` (npm, latest) | `AI_REVIEW_CLAUDE_TOKEN` |
+| `opencode` | **Implemented** — installs `opencode-ai` (npm, latest); `opencode run --pure` | `AI_REVIEW_OPENCODE_TOKEN` (or `OPENAI_API_KEY`) |
 | `cursor` | Not yet implemented | `AI_REVIEW_CURSOR_TOKEN` |
 | `antigravity` | Not yet implemented | `AI_REVIEW_ANTIGRAVITY_TOKEN` |
 

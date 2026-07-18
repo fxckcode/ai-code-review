@@ -24,11 +24,13 @@ jobs:
       - name: Run AI Code Review
         uses: ./
         with:
-          agent: claude
+          # Smoke / default agent: OpenCode (uses OPENAI_API_KEY via remap).
+          agent: opencode
         env:
           AI_REVIEW_GITHUB_TOKEN: ${{ secrets.AI_REVIEW_GITHUB_TOKEN }}
           AI_REVIEW_CLAUDE_TOKEN: ${{ secrets.AI_REVIEW_CLAUDE_TOKEN }}
-          AI_REVIEW_OPENCODE_TOKEN: ${{ secrets.AI_REVIEW_OPENCODE_TOKEN }}
+          # Prefer dedicated secret; fall back to existing OPENAI_API_KEY for smoke.
+          AI_REVIEW_OPENCODE_TOKEN: ${{ secrets.AI_REVIEW_OPENCODE_TOKEN || secrets.OPENAI_API_KEY }}
           AI_REVIEW_CURSOR_TOKEN: ${{ secrets.AI_REVIEW_CURSOR_TOKEN }}
           AI_REVIEW_ANTIGRAVITY_TOKEN: ${{ secrets.AI_REVIEW_ANTIGRAVITY_TOKEN }}
           AI_REVIEW_MODEL: ${{ secrets.AI_REVIEW_MODEL }}
