@@ -125,7 +125,8 @@ def _acp_prompt_turn(
     assert proc.stdin and proc.stdout and proc.stderr
 
     q: Queue[Optional[dict[str, Any]]] = Queue()
-    chunks: list[str] = []
+    message_chunks: list[str] = []
+    thought_chunks: list[str] = []
     stderr_buf: list[str] = []
 
     def _stdout_reader() -> None:
@@ -160,7 +161,9 @@ def _acp_prompt_turn(
         req_id = next_id
         next_id += 1
         send({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
-        return _wait_rpc(proc, q, req_id, deadline, chunks, send)
+        return _wait_rpc(
+            proc, q, req_id, deadline, message_chunks, thought_chunks, send
+        )
 
     try:
         rpc(
@@ -178,18 +181,27 @@ def _acp_prompt_turn(
         if not session_id:
             raise RuntimeError("opencode acp session/new missing sessionId")
 
+        # Prefixed instruction: CI review is text-only JSON (no tools).
+        review_prompt = (
+            "Do not use tools or shell commands. "
+            "Respond with the review JSON array only.\n\n"
+            + prompt
+        )
         result = rpc(
             "session/prompt",
             {
                 "sessionId": session_id,
-                "prompt": [{"type": "text", "text": prompt}],
+                "prompt": [{"type": "text", "text": review_prompt}],
             },
         )
         stop = result.get("stopReason")
         if debug:
             sys.stderr.write(f"[AI_REVIEW_DEBUG] stopReason={stop!r}\n")
 
-        text = "".join(chunks).strip()
+        text = "".join(message_chunks).strip()
+        if not text:
+            # Some OpenCode turns only stream agent_thought_chunk.
+            text = "".join(thought_chunks).strip()
         if not text:
             raise RuntimeError("opencode acp returned empty agent message")
         if debug:
@@ -219,7 +231,8 @@ def _wait_rpc(
     q: Queue[Optional[dict[str, Any]]],
     req_id: int,
     deadline: float,
-    chunks: list[str],
+    message_chunks: list[str],
+    thought_chunks: list[str],
     send,
 ) -> dict[str, Any]:
     while time.time() < deadline:
@@ -237,7 +250,9 @@ def _wait_rpc(
         # Notifications
         if "method" in msg and "id" not in msg:
             if msg.get("method") == "session/update":
-                _collect_chunk(msg.get("params") or {}, chunks)
+                _collect_chunk(
+                    msg.get("params") or {}, message_chunks, thought_chunks
+                )
             continue
 
         # Agent → client requests
@@ -253,15 +268,23 @@ def _wait_rpc(
     raise subprocess.TimeoutExpired(cmd="opencode acp", timeout=int(deadline))
 
 
-def _collect_chunk(params: dict[str, Any], chunks: list[str]) -> None:
+def _collect_chunk(
+    params: dict[str, Any],
+    message_chunks: list[str],
+    thought_chunks: list[str],
+) -> None:
     update = params.get("update") or {}
-    if update.get("sessionUpdate") != "agent_message_chunk":
-        return
+    kind = update.get("sessionUpdate")
     content = update.get("content") or {}
-    if isinstance(content, dict) and content.get("type") == "text":
-        text = content.get("text")
-        if text:
-            chunks.append(str(text))
+    if not (isinstance(content, dict) and content.get("type") == "text"):
+        return
+    text = content.get("text")
+    if not text:
+        return
+    if kind == "agent_message_chunk":
+        message_chunks.append(str(text))
+    elif kind == "agent_thought_chunk":
+        thought_chunks.append(str(text))
 
 
 def _handle_agent_request(msg: dict[str, Any], send) -> None:

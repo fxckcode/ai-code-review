@@ -37,8 +37,9 @@ class TestEnv:
 
 
 class TestCollectChunk:
-    def test_collects_agent_message_chunks(self):
-        chunks: list[str] = []
+    def test_collects_message_and_thought_separately(self):
+        messages: list[str] = []
+        thoughts: list[str] = []
         _collect_chunk(
             {
                 "update": {
@@ -46,7 +47,8 @@ class TestCollectChunk:
                     "content": {"type": "text", "text": "Hello"},
                 }
             },
-            chunks,
+            messages,
+            thoughts,
         )
         _collect_chunk(
             {
@@ -55,9 +57,11 @@ class TestCollectChunk:
                     "content": {"type": "text", "text": "thinking"},
                 }
             },
-            chunks,
+            messages,
+            thoughts,
         )
-        assert "".join(chunks) == "Hello"
+        assert "".join(messages) == "Hello"
+        assert "".join(thoughts) == "thinking"
 
     def test_transport_is_acp(self):
         assert OpencodeAdapter.transport == "acp"
