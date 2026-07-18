@@ -31,6 +31,30 @@ _TOKEN_DEST: str = "ANTHROPIC_API_KEY"
 # Output-log limit (threat check 3.4)
 _LOG_TAIL: int = 8 * 1024  # 8 KB
 
+# Minimal env keys passed to npm / claude (no AI_REVIEW_* / GH_TOKEN).
+_BASE_ENV_KEYS: tuple[str, ...] = (
+    "PATH",
+    "HOME",
+    "USER",
+    "USERPROFILE",
+    "USERNAME",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "SystemRoot",
+    "SYSTEMROOT",
+    "ComSpec",
+    "COMSPEC",
+    "LANG",
+    "LC_ALL",
+    "TZ",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "NODE_PATH",
+    "npm_config_prefix",
+    "npm_config_cache",
+)
+
 
 class ClaudeAdapter(Adapter):
     """Argv-transport adapter for the Anthropic Claude Code CLI."""
@@ -61,6 +85,7 @@ class ClaudeAdapter(Adapter):
                 text=True,
                 timeout=120,
                 check=True,
+                env=_minimal_base_env(),  # no secrets for npm install scripts
             )
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
@@ -114,10 +139,9 @@ class ClaudeAdapter(Adapter):
         _log_output(result.stdout, result.stderr, debug=debug)
 
         if result.returncode != 0:
-            raise RuntimeError(
-                f"claude --print exited {result.returncode}. "
-                f"stderr tail: {_tail(result.stderr, _LOG_TAIL)}"
-            )
+            # Do not embed stderr in the exception — orchestrator may post
+            # str(exc) on the PR. Details stay in Actions logs via _log_output.
+            raise RuntimeError(f"claude --print exited {result.returncode}")
 
         return result.stdout
 
@@ -125,6 +149,16 @@ class ClaudeAdapter(Adapter):
 # ---------------------------------------------------------------------------
 # Module-level helpers — pure, testable without instantiation
 # ---------------------------------------------------------------------------
+
+def _minimal_base_env() -> dict[str, str]:
+    """Return a least-privilege env for subprocesses (no AI_REVIEW_* / tokens)."""
+    env: dict[str, str] = {}
+    for key in _BASE_ENV_KEYS:
+        value = os.environ.get(key)
+        if value is not None:
+            env[key] = value
+    return env
+
 
 def _require_token() -> str:
     """Return the Claude token value or raise ``RuntimeError``.
@@ -143,18 +177,21 @@ def _require_token() -> str:
 
 
 def _build_env() -> dict[str, str]:
-    """Build the subprocess env: remap ``AI_REVIEW_CLAUDE_TOKEN`` → ``ANTHROPIC_API_KEY``.
+    """Build a least-privilege env for the Claude CLI child process.
 
-    The original ``AI_REVIEW_CLAUDE_TOKEN`` key is removed so it cannot
-    appear in any child-process environment dump or diagnostic log.
-    The token value is never written to this module's own logs.
+    Remaps ``AI_REVIEW_CLAUDE_TOKEN`` → ``ANTHROPIC_API_KEY``. Does **not**
+    inherit ``AI_REVIEW_*``, ``GH_TOKEN``, or other job secrets.
     """
     token = _require_token()
-    env = {**os.environ}
+    env = _minimal_base_env()
     env[_TOKEN_DEST] = token
-    env.pop(_TOKEN_SRC, None)  # scrub source key from child env
-    # Suppress telemetry / auto-update network calls in CI
-    env.setdefault("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+    # Suppress telemetry / auto-update network calls in CI unless already set
+    if "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" in os.environ:
+        env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = os.environ[
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"
+        ]
+    else:
+        env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     return env
 
 

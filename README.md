@@ -1,47 +1,193 @@
-# AI Code Review — GitHub Actions + Claude
+# AI Code Review — GitHub Action
 
-Revisión automatizada de PRs usando **Claude** y comentarios inline vía **GitHub CLI**.
+Automated PR code reviews posted as inline comments, powered by pluggable AI agent CLI adapters.
 
-## Cómo funciona
+> **v1 scope**: CI-only (`pull_request` trigger). Local review CLI is out of scope for v1.
 
-1. Cuando abres o actualizas un PR, el action se dispara
-2. Obtiene el diff del PR
-3. Lo envía a **Claude** (Anthropic API) para revisión estructurada
-4. Claude devuelve feedback con: `archivo`, `línea`, `severidad`, `comentario`
-5. Se publica como **review en el PR** con comentarios inline en cada línea
+---
 
-## Setup
+## Quick start
 
-### 1. Agregar secrets al repo
+```yaml
+# .github/workflows/pr-review.yml
+name: AI Code Review
 
-| Secret | Valor |
-|--------|-------|
-| `ANTHROPIC_API_KEY` | Tu API key de Anthropic |
-| `GITHUB_TOKEN` | ya viene pre-configurado (default) |
+on:
+  pull_request:
+    types: [opened, synchronize]
 
-### 2. Configurar (opcional) en el workflow
+permissions:
+  contents: read
+  pull-requests: write
 
-- Cambiar `model` por defecto (`claude-sonnet-4-20250514`)
-- Ajustar el `prompt` de review
+concurrency:
+  group: ai-review-${{ github.ref }}
+  cancel-in-progress: true
 
-## Resultado
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4        # required — action reads AGENTS.md from the workspace
+        with:
+          fetch-depth: 0
 
-Cada comentario aparece como inline en la línea exacta del archivo en el PR:
+      - uses: org/ai-code-review@v1
+        with:
+          agent: claude
+        env:
+          AI_REVIEW_GITHUB_TOKEN: ${{ secrets.AI_REVIEW_GITHUB_TOKEN }}
+          AI_REVIEW_CLAUDE_TOKEN:  ${{ secrets.AI_REVIEW_CLAUDE_TOKEN }}
+```
+
+---
+
+## Consumer contract
+
+### Preconditions
+
+| Requirement | Detail |
+|-------------|--------|
+| **Checkout step** | `actions/checkout` must run before this action. The orchestrator reads `AGENTS.md` from `$GITHUB_WORKSPACE`. Missing checkout causes a clear precondition error. |
+| **`AGENTS.md` at repo root** | The file must exist and be non-empty. The action fails fast if it is absent or empty. See [Authoring AGENTS.md](#authoring-agentsmd). |
+| **Runner** | `ubuntu-latest` (GitHub-hosted). The action installs Python 3.12 via `setup-python@v5`. |
+| **Trigger** | `pull_request` event only (v1). `push`, `workflow_dispatch`, and mention triggers are not supported. |
+
+### Permissions
+
+```yaml
+permissions:
+  contents: read        # read AGENTS.md and repo files
+  pull-requests: write  # post the review
+```
+
+### Concurrency
+
+Always add a concurrency group to avoid parallel review runs for the same branch:
+
+```yaml
+concurrency:
+  group: ai-review-${{ github.ref }}
+  cancel-in-progress: true
+```
+
+### Inputs
+
+| Input | Required | Description |
+|-------|----------|-------------|
+| `agent` | yes | Agent CLI to use. Accepted: `claude`. Others (`opencode`, `cursor`, `antigravity`) are declared but not yet implemented — they will fail with `not implemented yet`. |
+
+### Secrets and environment variables
+
+| Variable | Secret? | Description |
+|----------|---------|-------------|
+| `AI_REVIEW_GITHUB_TOKEN` | yes | GitHub token with `pull-requests: write`. Use a PAT or the default `GITHUB_TOKEN`. |
+| `AI_REVIEW_CLAUDE_TOKEN` | yes | Anthropic token for the Claude CLI (`claude` agent). Remapped internally to `ANTHROPIC_API_KEY`. |
+| `AI_REVIEW_OPENCODE_TOKEN` | yes | Token for the OpenCode agent (reserved; not implemented yet). |
+| `AI_REVIEW_CURSOR_TOKEN` | yes | Token for the Cursor agent (reserved; not implemented yet). |
+| `AI_REVIEW_ANTIGRAVITY_TOKEN` | yes | Token for the Antigravity agent (reserved; not implemented yet). |
+| `AI_REVIEW_MODEL` | optional | Override the model used by the agent CLI (agent-specific format). |
+| `AI_REVIEW_DEBUG` | optional | Set to `1` to emit full agent output in logs instead of last 8 KB. |
+
+Only set the token secret for the agent you are using — unused tokens are ignored.
+
+---
+
+## Supported agents
+
+| Agent | Status | Token secret |
+|-------|--------|--------------|
+| `claude` | **Implemented** — installs `@anthropic-ai/claude-code` (npm, latest) at run time | `AI_REVIEW_CLAUDE_TOKEN` |
+| `opencode` | Not yet implemented | `AI_REVIEW_OPENCODE_TOKEN` |
+| `cursor` | Not yet implemented | `AI_REVIEW_CURSOR_TOKEN` |
+| `antigravity` | Not yet implemented | `AI_REVIEW_ANTIGRAVITY_TOKEN` |
+
+Selecting an unimplemented agent causes the job to fail red with `not implemented yet`.
+
+---
+
+## Authoring AGENTS.md
+
+`AGENTS.md` at repo root is **mandatory and must be non-empty**. The orchestrator injects it at the
+start of every review prompt. It should contain the conventions, invariants, and review priorities
+specific to your codebase.
+
+Minimal example:
+
+```markdown
+# AGENTS.md
+
+## Hard rules
+- No `eval()` or dynamic code execution.
+- All database queries must use parameterised statements.
+
+## Warnings
+- Public methods without docstrings should be flagged.
+
+## Out of scope
+- Whitespace-only changes.
+```
+
+See the [`AGENTS.md`](./AGENTS.md) in this repo for a full worked example.
+
+---
+
+## How it works
 
 ```
-📌 src/app.ts | L42 | ⚠️ warning
-   Considera extraer esta lógica a un helper.
-
-📌 src/utils.ts | L15 | 🔴 error
-   Esta función muta el argumento original - hacer inmutable.
+caller workflow (checkout, secrets, concurrency)
+  └─→ action.yml  (agent input → AI_AGENT env var)
+        └─→ review.py orchestrator
+             1  gh pr diff → temp file (truncated at 80 k chars with a prompt note)
+             2  read AGENTS.md  (mandatory; fails if missing or empty)
+             3  build English prompt = AGENTS.md + base schema
+             4  registry.select(AI_AGENT) → adapter
+                  ensure_installed  → installs CLI (user-local, latest)
+                  remap AI_REVIEW_<AGENT>_TOKEN → native CLI env var
+                  run(prompt, diff_path, config) → list of comments
+             5  one parse retry on malformed output
+             6  filter comments not anchored to the diff (drop + log)
+             7  post GitHub PR review  (REQUEST_CHANGES | COMMENT)
 ```
 
-## Personalización
+### Review events
 
-Edita el `SYSTEM_PROMPT` en `.github/scripts/review.py` para cambiar el estilo o reglas de revisión. Por defecto revisa: seguridad, rendimiento, legibilidad, buenas prácticas y errores potenciales.
+| Condition | Event |
+|-----------|-------|
+| ≥ 1 anchored 🔴 error | `REQUEST_CHANGES` |
+| Warnings or suggestions only | `COMMENT` |
+| All comments unanchored to diff | `COMMENT` with summary listing them |
+| Empty diff | `COMMENT` — nothing to review |
+| No issues found | `COMMENT` — clean summary |
+
+### Failure UX
+
+| Failure | Job result |
+|---------|------------|
+| Agent timeout (> 5 min) | Posts ⚠️ failed-review comment; **job stays green** |
+| Agent crash | Posts ⚠️ failed-review comment; **job stays green** |
+| Parse failure after retry | **Job exits red** |
+| Unknown agent / missing secret / empty AGENTS.md | **Job exits red** |
+
+---
+
+## Review output format
+
+Each inline comment is posted on the exact diff line it references:
+
+```
+🔴 error   — src/app.ts:42 — This mutation bypasses the cache layer.
+⚠️ warning  — src/utils.ts:15 — Function mutates its argument; prefer returning a new value.
+💡 suggestion — src/helpers.ts:8 — Extract to a named constant for readability.
+```
+
+The review summary header is always prefixed `AI Code Review ({agent})`.
+
+---
 
 ## Stack
 
-- Python 3.11+
-- `gh` CLI (viene en las runners de GitHub)
-- Anthropic Claude API
+- Python 3.12 (installed at run time via `setup-python@v5`)
+- `gh` CLI (pre-installed on GitHub-hosted runners)
+- Agent-specific CLI installed by the adapter at run time (e.g. `@anthropic-ai/claude-code`)
+- No vendor SDK dependency in the orchestrator

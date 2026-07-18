@@ -43,6 +43,10 @@ class TestExtractJson:
         with pytest.raises((ValueError, json.JSONDecodeError)):
             extract_json("This is plain text with no JSON.")
 
+    def test_fenced_object_rejected(self):
+        with pytest.raises(ValueError, match="JSON array"):
+            extract_json('```json\n{"not": "an array"}\n```')
+
     def test_whitespace_stripped(self):
         assert extract_json("  []  ") == []
 

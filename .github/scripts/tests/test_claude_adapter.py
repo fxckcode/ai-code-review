@@ -134,6 +134,19 @@ class TestAuthEnvRemap:
         # setdefault must not overwrite an existing value
         assert env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC") == "0"
 
+    def test_job_secrets_not_inherited(self, monkeypatch):
+        monkeypatch.setenv("AI_REVIEW_CLAUDE_TOKEN", "tok-abc")
+        monkeypatch.setenv("AI_REVIEW_GITHUB_TOKEN", "gh-secret")
+        monkeypatch.setenv("AI_REVIEW_OPENCODE_TOKEN", "oc-secret")
+        monkeypatch.setenv("GH_TOKEN", "legacy-gh")
+        from adapters.claude import _build_env
+        env = _build_env()
+        assert "AI_REVIEW_GITHUB_TOKEN" not in env
+        assert "AI_REVIEW_OPENCODE_TOKEN" not in env
+        assert "AI_REVIEW_CLAUDE_TOKEN" not in env
+        assert "GH_TOKEN" not in env
+        assert env.get("ANTHROPIC_API_KEY") == "tok-abc"
+
 
 class TestTailHelper:
     """_tail truncates correctly (backing threat check: output log limited)."""
