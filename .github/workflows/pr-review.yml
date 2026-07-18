@@ -8,6 +8,10 @@ permissions:
   contents: read
   pull-requests: write
 
+concurrency:
+  group: ai-review-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   review:
     runs-on: ubuntu-latest
@@ -17,18 +21,15 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Run AI Code Review
+        uses: ./
         with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: pip install anthropic
-
-      - name: Run AI review
+          agent: claude
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-        run: python .github/scripts/review.py
+          AI_REVIEW_GITHUB_TOKEN: ${{ secrets.AI_REVIEW_GITHUB_TOKEN }}
+          AI_REVIEW_CLAUDE_TOKEN: ${{ secrets.AI_REVIEW_CLAUDE_TOKEN }}
+          AI_REVIEW_OPENCODE_TOKEN: ${{ secrets.AI_REVIEW_OPENCODE_TOKEN }}
+          AI_REVIEW_CURSOR_TOKEN: ${{ secrets.AI_REVIEW_CURSOR_TOKEN }}
+          AI_REVIEW_ANTIGRAVITY_TOKEN: ${{ secrets.AI_REVIEW_ANTIGRAVITY_TOKEN }}
+          AI_REVIEW_MODEL: ${{ secrets.AI_REVIEW_MODEL }}
+          AI_REVIEW_DEBUG: ${{ vars.AI_REVIEW_DEBUG }}

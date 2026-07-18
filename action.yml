@@ -1,0 +1,30 @@
+name: AI Code Review
+description: >
+  Post an AI-powered code review on a pull request using a pluggable agent CLI
+  adapter (claude, opencode, cursor, antigravity).
+
+inputs:
+  agent:
+    description: >
+      Agent CLI to use for the review.
+      Accepted values: claude, opencode, cursor, antigravity.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Run AI Code Review orchestrator
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        # Wire the single action input to the env var the orchestrator reads.
+        AI_AGENT: ${{ inputs.agent }}
+        # PR context — derived from trusted GitHub event data only.
+        GITHUB_PR_NUMBER: ${{ github.event.pull_request.number }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+      run: python "${{ github.action_path }}/.github/scripts/review.py"
