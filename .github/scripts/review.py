@@ -511,6 +511,7 @@ def main() -> None:
     config = {
         "model": os.environ.get("AI_REVIEW_MODEL", ""),
         "debug": DEBUG,
+        "timeout": ADAPTER_TIMEOUT,
     }
     comments: list[dict]
 
