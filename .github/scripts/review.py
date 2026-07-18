@@ -309,7 +309,12 @@ def post_review(
     body: str,
     inline: list[dict],
 ) -> str:
-    """Post a new GitHub PR review.  Returns the HTML URL of the review."""
+    """Post a new GitHub PR review.  Returns the HTML URL of the review.
+
+    If ``REQUEST_CHANGES`` is rejected because the token belongs to the PR
+    author (GitHub 422), fall back to ``COMMENT`` so self-review smoke still
+    publishes inline findings.
+    """
     api_comments = [
         {
             "path": c["path"],
@@ -319,16 +324,42 @@ def post_review(
         }
         for c in inline
     ]
-    payload = {"body": body, "event": event, "comments": api_comments}
-    result = run_gh(
-        "api",
-        f"/repos/{REPO}/pulls/{PR_NUMBER}/reviews",
-        "--method", "POST",
-        "--input", "-",
-        input_data=json.dumps(payload),
-        use_repo=False,
-    )
-    return json.loads(result).get("html_url", "N/A")
+
+    def _submit(ev: str) -> subprocess.CompletedProcess[str]:
+        payload = {"body": body, "event": ev, "comments": api_comments}
+        return subprocess.run(
+            [
+                "gh",
+                "api",
+                f"/repos/{REPO}/pulls/{PR_NUMBER}/reviews",
+                "--method",
+                "POST",
+                "--input",
+                "-",
+            ],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env=_gh_env(),
+        )
+
+    result = _submit(event)
+    if result.returncode != 0:
+        err = f"{result.stderr}{result.stdout}".lower()
+        if event == "REQUEST_CHANGES" and "own pull request" in err:
+            print(
+                "  ↷ REQUEST_CHANGES not allowed on own PR — posting as COMMENT",
+                file=sys.stderr,
+            )
+            result = _submit("COMMENT")
+        if result.returncode != 0:
+            print(
+                f"::error::gh api reviews POST failed: {result.stderr.strip()}",
+                file=sys.stderr,
+            )
+            result.check_returncode()
+    return json.loads(result.stdout).get("html_url", "N/A")
 
 
 def post_failure_comment(agent: str, reason: str) -> None:
